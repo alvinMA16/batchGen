@@ -13,7 +13,7 @@
     <style>
         /* 自定义样式：限制结果中的图片最大宽度，但不影响下载 */
         .prose img {
-            max-width: 25%; /* 限制显示宽度为 1/4 */
+            max-width: 100%; /* 在网格布局中，我们希望图片占满卡片宽度 */
             height: auto;
             border-radius: 0.5rem;
             border: 1px solid #e5e7eb;
@@ -120,12 +120,12 @@
         <div v-if="results.length > 0" class="space-y-4">
             <h2 class="text-xl font-bold text-gray-800 border-l-4 border-indigo-600 pl-3">运行结果 ([[ results.length ]])</h2>
             
-            <div class="grid grid-cols-1 gap-4">
-                <div v-for="item in results" :key="item.index" class="bg-white p-4 rounded-lg shadow border border-gray-100 hover:shadow-md transition">
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div v-for="item in results" :key="item.index" class="bg-white p-4 rounded-lg shadow border border-gray-100 hover:shadow-md transition flex flex-col">
                     <div class="flex justify-between items-center mb-2">
                         <span class="px-2 py-1 bg-indigo-100 text-indigo-800 text-xs font-semibold rounded">#[[ item.index ]]</span>
                     </div>
-                    <div class="prose text-gray-600 text-sm bg-gray-50 p-3 rounded overflow-auto" v-html="renderMarkdown(item.result)"></div>
+                    <div class="prose text-gray-600 text-sm bg-gray-50 p-3 rounded overflow-auto flex-grow" v-html="renderMarkdown(item.result)"></div>
                 </div>
             </div>
         </div>
@@ -141,7 +141,7 @@
             setup() {
                 const file = ref(null)
                 const imagePreview = ref(null)
-                const systemPrompt = ref('Generate a variation of this image. 生成符合prompt的图片，要求清晰，白色背景')
+                const systemPrompt = ref('Generate a variation of this image. 生成符合prompt的图片，要求清晰，风格一致、白色背景')
                 const userPrompt = ref('请生成一个袋熊。')
                 const batchCount = ref(3)
                 const loading = ref(false)
