@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 批量生成工具</title>
+    <!-- 引入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Vue.js (使用 CDN 简单模式，方便交互逻辑) -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <!-- 引入 Marked.js 用于渲染 Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        /* 自定义样式：限制结果中的图片最大宽度，但不影响下载 */
+        .prose img {
+            max-width: 25%; /* 限制显示宽度为 1/4 */
+            height: auto;
+            border-radius: 0.5rem;
+            border: 1px solid #e5e7eb;
+            cursor: zoom-in; /* 鼠标悬停显示放大镜 */
+            transition: transform 0.2s ease-in-out;
+        }
+        
+        /* 鼠标悬停时稍微放大一点点，增加交互感 */
+        .prose img:hover {
+            transform: scale(1.05);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+
+        /* 点击查看大图的简易实现（可选，这里使用 active 状态简单模拟，也可以用 lightbox 库） */
+        .prose img:active {
+            max-width: 100%; /* 按住时显示原图大小 */
+            cursor: zoom-out;
+            z-index: 50;
+            position: relative;
+        }
+    </style>
+</head>
+<body class="bg-gray-50 min-h-screen text-gray-800">
+    <div id="app" class="flex flex-col md:flex-row min-h-screen">
+    
+    <!-- 侧边栏：历史图片 -->
+    <div class="w-full md:w-64 bg-white border-r border-gray-200 p-4 md:h-screen md:overflow-y-auto flex-shrink-0">
+        <h3 class="text-lg font-bold text-gray-700 mb-4 flex items-center justify-between">
+            历史图片
+            <button @click="loadHistory" class="text-xs text-indigo-600 hover:underline">刷新</button>
+        </h3>
+        <div v-if="historyFiles.length === 0" class="text-sm text-gray-400 text-center py-4">暂无图片</div>
+        <div class="grid grid-cols-3 gap-2">
+            <div v-for="img in historyFiles" :key="img.filename" 
+                 class="aspect-square border border-gray-200 rounded overflow-hidden cursor-pointer hover:ring-2 hover:ring-indigo-500 relative group"
+                 @click="selectHistoryImage(img)"
+                 :title="img.filename">
+                <img :src="img.url" class="w-full h-full object-cover" loading="lazy">
+                <div class="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-10 transition"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container mx-auto px-4 py-8 max-w-4xl flex-grow">
+        <header class="mb-8 text-center">
+            <h1 class="text-3xl font-bold text-indigo-600 mb-2">Batch Gen AI</h1>
+            <p class="text-gray-500">上传图片并设置 Prompt，批量运行以测试稳定性</p>
+        </header>
+
+        <!-- 输入区域 -->
+        <div class="bg-white rounded-xl shadow-md p-6 mb-8">
+            <form @submit.prevent="runBatch" class="space-y-6">
+                
+                <!-- 图片上传 -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-2">上传图片</label>
+                    <div class="flex items-center justify-center w-full">
+                        <label for="dropzone-file" class="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 relative overflow-hidden">
+                            <div v-if="!imagePreview" class="flex flex-col items-center justify-center pt-5 pb-6">
+                                <svg class="w-8 h-8 mb-4 text-gray-500" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 20 16">
+                                    <path stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 13h3a3 3 0 0 0 0-6h-.025A5.56 5.56 0 0 0 16 6.5 5.5 5.5 0 0 0 5.207 5.021C5.137 5.017 5.071 5 5 5a4 4 0 0 0 0 8h2.167M10 15V6m0 0L8 8m2-2 2 2"/>
+                                </svg>
+                                <p class="text-sm text-gray-500"><span class="font-semibold">点击上传</span> 或拖拽文件</p>
+                            </div>
+                            <img v-else :src="imagePreview" class="absolute inset-0 w-full h-full object-contain p-2" />
+                            <input id="dropzone-file" type="file" class="hidden" @change="handleFileUpload" accept="image/*" />
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Prompts -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">System Prompt</label>
+                        <textarea v-model="systemPrompt" rows="4" class="w-full p-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" placeholder="例如：你是一个资深的艺术鉴赏家..."></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">User Prompt</label>
+                        <textarea v-model="userPrompt" rows="4" class="w-full p-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" placeholder="例如：请详细描述这张图片..."></textarea>
+                    </div>
+                </div>
+
+                <!-- 设置 -->
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-2">
+                        <label class="text-sm font-medium text-gray-700">运行次数 (Batch Size):</label>
+                        <input v-model="batchCount" type="number" min="1" max="20" class="w-20 p-1 border border-gray-300 rounded text-center">
+                    </div>
+                    
+                    <button type="submit" :disabled="loading || !file" :class="{'opacity-50 cursor-not-allowed': loading || !file}" class="px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-200 flex items-center">
+                        <span v-if="loading" class="mr-2">
+                            <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </span>
+                        [[ loading ? '生成中...' : '开始运行' ]]
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- 结果展示 -->
+        <div v-if="results.length > 0" class="space-y-4">
+            <h2 class="text-xl font-bold text-gray-800 border-l-4 border-indigo-600 pl-3">运行结果 ([[ results.length ]])</h2>
+            
+            <div class="grid grid-cols-1 gap-4">
+                <div v-for="item in results" :key="item.index" class="bg-white p-4 rounded-lg shadow border border-gray-100 hover:shadow-md transition">
+                    <div class="flex justify-between items-center mb-2">
+                        <span class="px-2 py-1 bg-indigo-100 text-indigo-800 text-xs font-semibold rounded">#[[ item.index ]]</span>
+                    </div>
+                    <div class="prose text-gray-600 text-sm bg-gray-50 p-3 rounded overflow-auto" v-html="renderMarkdown(item.result)"></div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+    </div> <!-- End of #app -->
+
+    <script>
+        const { createApp, ref } = Vue
+
+        createApp({
+            delimiters: ['[[', ']]'],
+            setup() {
+                const file = ref(null)
+                const imagePreview = ref(null)
+                const systemPrompt = ref('Generate a variation of this image. 生成符合prompt的图片，要求清晰，白色背景')
+                const userPrompt = ref('请生成一个袋熊。')
+                const batchCount = ref(3)
+                const loading = ref(false)
+                const results = ref([])
+                const historyFiles = ref([])
+
+                // 加载历史图片
+                const loadHistory = async () => {
+                    try {
+                        const res = await fetch('/api/history')
+                        const data = await res.json()
+                        if (data.files) {
+                            historyFiles.value = data.files
+                        }
+                    } catch (e) {
+                        console.error("Failed to load history", e)
+                    }
+                }
+
+                // 选择历史图片并填入上传区
+                const selectHistoryImage = async (imgObj) => {
+                    try {
+                        const response = await fetch(imgObj.url)
+                        const blob = await response.blob()
+                        // 创建一个新的 File 对象，模拟用户上传
+                        const newFile = new File([blob], imgObj.filename, { type: blob.type })
+                        
+                        file.value = newFile
+                        imagePreview.value = imgObj.url
+                    } catch (e) {
+                        console.error("Failed to select image", e)
+                        alert("图片加载失败")
+                    }
+                }
+                
+                // 初始化加载
+                loadHistory()
+
+                const handleFileUpload = (event) => {
+                    const selectedFile = event.target.files[0]
+                    if (selectedFile) {
+                        file.value = selectedFile
+                        imagePreview.value = URL.createObjectURL(selectedFile)
+                    }
+                }
+
+                const runBatch = async () => {
+                    if (!file.value) return
+                    
+                    loading.value = true
+                    results.value = []
+
+                    const formData = new FormData()
+                    formData.append('image', file.value)
+                    formData.append('system_prompt', systemPrompt.value)
+                    formData.append('user_prompt', userPrompt.value)
+                    formData.append('batch_count', batchCount.value)
+
+                    try {
+                        const response = await fetch('/api/batch_generate', {
+                            method: 'POST',
+                            body: formData
+                        })
+                        
+                        const data = await response.json()
+                        if (data.results) {
+                            results.value = data.results
+                            // 运行完成后刷新历史记录，因为可能生成了新图片
+                            loadHistory()
+                        } else {
+                            alert('生成失败: ' + JSON.stringify(data))
+                        }
+                    } catch (error) {
+                        console.error(error)
+                        alert('请求出错，请检查后台日志')
+                    } finally {
+                        loading.value = false
+                    }
+                }
+
+                const renderMarkdown = (text) => {
+                    if (!text) return ''
+                    return marked.parse(text)
+                }
+
+                return {
+                    file,
+                    imagePreview,
+                    systemPrompt,
+                    userPrompt,
+                    batchCount,
+                    loading,
+                    results,
+                    historyFiles,
+                    handleFileUpload,
+                    runBatch,
+                    renderMarkdown,
+                    loadHistory,
+                    selectHistoryImage
+                }
+            }
+        }).mount('#app')
+    </script>
+</body>
+</html>
+
