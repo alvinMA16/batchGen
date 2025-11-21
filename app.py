@@ -14,8 +14,10 @@ app = Flask(__name__)
 
 # 配置
 UPLOAD_FOLDER = 'uploads'
+VIDEO_FOLDER = 'videos'
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+app.config['VIDEO_FOLDER'] = VIDEO_FOLDER
 
 # 配置 Gemini API Client
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
@@ -28,6 +30,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 # 确保上传目录存在
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(VIDEO_FOLDER, exist_ok=True)
 
 def allowed_file(filename):
     return '.' in filename and \
@@ -142,6 +145,99 @@ def generate_gemini_response(index, system_prompt, user_prompt, image_path):
             "status": "error"
         }
 
+def generate_video_task(index, prompt, first_frame_path, last_frame_path, duration):
+    """
+    Call Google Veo API to generate video
+    """
+    try:
+        # Load images as bytes
+        with open(first_frame_path, 'rb') as f:
+            first_frame_bytes = f.read()
+        
+        with open(last_frame_path, 'rb') as f:
+            last_frame_bytes = f.read()
+
+        # Determine MIME type
+        first_mime = 'image/jpeg'
+        if first_frame_path.lower().endswith('.png'):
+            first_mime = 'image/png'
+        elif first_frame_path.lower().endswith('.webp'):
+            first_mime = 'image/webp'
+
+        last_mime = 'image/jpeg'
+        if last_frame_path.lower().endswith('.png'):
+            last_mime = 'image/png'
+        elif last_frame_path.lower().endswith('.webp'):
+            last_mime = 'image/webp'
+
+        # Create types.Image objects
+        first_image = types.Image(
+            image_bytes=first_frame_bytes,
+            mime_type=first_mime
+        )
+        last_image = types.Image(
+            image_bytes=last_frame_bytes,
+            mime_type=last_mime
+        )
+
+        # Note: duration is not directly supported in generate_videos currently (as per typical API),
+        # but we can include it in the prompt.
+        full_prompt = f"{prompt} (Duration: {duration} seconds)"
+
+        print(f"Starting video generation {index} with prompt: {full_prompt}")
+        
+        operation = client.models.generate_videos(
+            model="veo-3.1-generate-preview",
+            prompt=full_prompt,
+            image=first_image,
+            config=types.GenerateVideosConfig(
+                last_frame=last_image
+            ),
+        )
+        
+        # Poll the operation status
+        while not operation.done:
+            print(f"Waiting for video generation {index} to complete...")
+            time.sleep(5)
+            operation = client.operations.get(operation)
+            
+            # Download the video
+        if operation.response and operation.response.generated_videos:
+            video_resource = operation.response.generated_videos[0]
+            
+            timestamp = int(time.time() * 1000)
+            video_filename = f"gen_video_{index}_{timestamp}.mp4"
+            video_filepath = os.path.join(app.config['VIDEO_FOLDER'], video_filename)
+            
+            # Ensure client.files.download is called if necessary, then save.
+            # Based on snippet:
+            client.files.download(file=video_resource.video)
+            video_resource.video.save(video_filepath)
+            
+            print(f"Generated video saved to {video_filepath}")
+
+            return {
+                "index": index + 1,
+                "result": f"Video Generated based on: {prompt}",
+                "video_url": f"/videos/{video_filename}",
+                "status": "success"
+            }
+        else:
+            return {
+                "index": index + 1,
+                "result": "Video generation operation completed but no video resource found.",
+                "status": "error"
+            }
+
+    except Exception as e:
+        print(f"Error in video generation {index}: {e}")
+        return {
+            "index": index + 1,
+            "result": f"Video generation error: {str(e)}",
+            "status": "error"
+        }
+
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -149,6 +245,10 @@ def index():
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+@app.route('/videos/<filename>')
+def video_file(filename):
+    return send_from_directory(app.config['VIDEO_FOLDER'], filename)
 
 @app.route('/api/history')
 def get_history():
@@ -223,6 +323,70 @@ def batch_generate():
 
     return jsonify({
         "message": "批处理完成",
+        "total": batch_count,
+        "results": results
+    })
+
+@app.route('/api/video_generate', methods=['POST'])
+def video_generate():
+    # 1. 校验图片
+    if 'first_frame' not in request.files or 'last_frame' not in request.files:
+        return jsonify({"error": "缺少首帧或尾帧图片"}), 400
+    
+    first_file = request.files['first_frame']
+    last_file = request.files['last_frame']
+    
+    if first_file.filename == '' or last_file.filename == '':
+        return jsonify({"error": "未选择文件"}), 400
+    
+    if not (allowed_file(first_file.filename) and allowed_file(last_file.filename)):
+        return jsonify({"error": "文件类型不支持"}), 400
+
+    # 保存上传的文件到 videos 目录，避免出现在历史图片区
+    first_filename = secure_filename(f"v_first_{int(time.time())}_{first_file.filename}")
+    last_filename = secure_filename(f"v_last_{int(time.time())}_{last_file.filename}")
+    
+    first_filepath = os.path.join(app.config['VIDEO_FOLDER'], first_filename)
+    last_filepath = os.path.join(app.config['VIDEO_FOLDER'], last_filename)
+    
+    first_file.save(first_filepath)
+    last_file.save(last_filepath)
+
+    # 2. 获取参数
+    data = request.form
+    prompt = data.get('prompt', '')
+    try:
+        batch_count = int(data.get('batch_count', 1))
+        if batch_count > 5: batch_count = 5
+    except ValueError:
+        batch_count = 1
+        
+    try:
+        duration = int(data.get('duration', 5))
+    except ValueError:
+        duration = 5
+
+    # 3. 并发执行生成任务
+    results = []
+    # Video generation is slower, limit workers
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = []
+        for i in range(batch_count):
+            futures.append(
+                executor.submit(generate_video_task, i, prompt, first_filepath, last_filepath, duration)
+            )
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as e:
+                results.append({"status": "error", "error": str(e)})
+
+    # 结果按索引排序
+    results.sort(key=lambda x: x.get('index', 0))
+
+    return jsonify({
+        "message": "视频生成批处理完成",
         "total": batch_count,
         "results": results
     })

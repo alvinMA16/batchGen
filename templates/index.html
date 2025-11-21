@@ -58,13 +58,25 @@
     </div>
 
     <div class="container mx-auto px-4 py-8 max-w-4xl flex-grow">
-        <header class="mb-8 text-center">
+        <header class="mb-8 text-center relative">
             <h1 class="text-3xl font-bold text-indigo-600 mb-2">Batch Gen AI</h1>
             <p class="text-gray-500">上传图片并设置 Prompt，批量运行以测试稳定性</p>
+            
+            <!-- Mode Toggle -->
+            <div class="absolute top-0 right-0">
+                <div class="inline-flex rounded-md shadow-sm" role="group">
+                    <button type="button" @click="mode = 'image'" :class="['px-4 py-2 text-sm font-medium border rounded-l-lg', mode === 'image' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50']">
+                        图片生成
+                    </button>
+                    <button type="button" @click="mode = 'video'" :class="['px-4 py-2 text-sm font-medium border rounded-r-lg', mode === 'video' ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-gray-700 border-gray-200 hover:bg-gray-50']">
+                        视频生成
+                    </button>
+                </div>
+            </div>
         </header>
 
-        <!-- 输入区域 -->
-        <div class="bg-white rounded-xl shadow-md p-6 mb-8">
+        <!-- 图片生成输入区域 -->
+        <div v-if="mode === 'image'" class="bg-white rounded-xl shadow-md p-6 mb-8">
             <form @submit.prevent="runBatch" class="space-y-6">
                 
                 <!-- 图片上传 -->
@@ -116,6 +128,70 @@
             </form>
         </div>
 
+        <!-- 视频生成输入区域 -->
+        <div v-if="mode === 'video'" class="bg-white rounded-xl shadow-md p-6 mb-8">
+            <form @submit.prevent="runVideoBatch" class="space-y-6">
+                
+                <!-- 视频首尾帧上传 -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">第一帧 (Start Frame)</label>
+                        <div class="flex items-center justify-center w-full">
+                            <label class="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 relative overflow-hidden">
+                                <div v-if="!videoFirstFramePreview" class="flex flex-col items-center justify-center pt-5 pb-6">
+                                    <svg class="w-8 h-8 mb-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                    <p class="text-sm text-gray-500">上传首帧</p>
+                                </div>
+                                <img v-else :src="videoFirstFramePreview" class="absolute inset-0 w-full h-full object-contain p-2" />
+                                <input type="file" class="hidden" @change="(e) => handleVideoFileUpload(e, 'first')" accept="image/*" />
+                            </label>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-2">最后一帧 (End Frame)</label>
+                        <div class="flex items-center justify-center w-full">
+                            <label class="flex flex-col items-center justify-center w-full h-32 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100 relative overflow-hidden">
+                                <div v-if="!videoLastFramePreview" class="flex flex-col items-center justify-center pt-5 pb-6">
+                                    <svg class="w-8 h-8 mb-4 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                    <p class="text-sm text-gray-500">上传尾帧</p>
+                                </div>
+                                <img v-else :src="videoLastFramePreview" class="absolute inset-0 w-full h-full object-contain p-2" />
+                                <input type="file" class="hidden" @change="(e) => handleVideoFileUpload(e, 'last')" accept="image/*" />
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Video Prompt -->
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Video Prompt</label>
+                    <textarea v-model="videoPrompt" rows="3" class="w-full p-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500" placeholder="Describe the video movement..."></textarea>
+                </div>
+
+                <!-- Video Settings -->
+                <div class="flex items-center gap-6">
+                    <div class="flex items-center space-x-2">
+                        <label class="text-sm font-medium text-gray-700">数量:</label>
+                        <input v-model="videoBatchCount" type="number" min="1" max="5" class="w-20 p-1 border border-gray-300 rounded text-center">
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <label class="text-sm font-medium text-gray-700">时长 (s):</label>
+                        <input v-model="videoDuration" type="number" min="1" max="10" class="w-20 p-1 border border-gray-300 rounded text-center" placeholder="5">
+                    </div>
+                    
+                    <button type="submit" :disabled="loading || !videoFirstFrame || !videoLastFrame" :class="{'opacity-50 cursor-not-allowed': loading || !videoFirstFrame || !videoLastFrame}" class="ml-auto px-6 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-200 flex items-center">
+                        <span v-if="loading" class="mr-2">
+                            <svg class="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                            </svg>
+                        </span>
+                        [[ loading ? '生成中...' : '生成视频' ]]
+                    </button>
+                </div>
+            </form>
+        </div>
+
         <!-- 结果展示 -->
         <div v-if="results.length > 0" class="space-y-4">
             <h2 class="text-xl font-bold text-gray-800 border-l-4 border-indigo-600 pl-3">运行结果 ([[ results.length ]])</h2>
@@ -125,7 +201,15 @@
                     <div class="flex justify-between items-center mb-2">
                         <span class="px-2 py-1 bg-indigo-100 text-indigo-800 text-xs font-semibold rounded">#[[ item.index ]]</span>
                     </div>
-                    <div class="prose text-gray-600 text-sm bg-gray-50 p-3 rounded overflow-auto flex-grow" v-html="renderMarkdown(item.result)"></div>
+                    <div class="prose text-gray-600 text-sm bg-gray-50 p-3 rounded overflow-auto flex-grow">
+                         <!-- Video Support -->
+                         <div v-if="item.video_url">
+                            <video controls class="w-full rounded" :src="item.video_url"></video>
+                            <div v-if="item.result" v-html="renderMarkdown(item.result)" class="mt-2"></div>
+                         </div>
+                         <!-- Standard Markdown/Image Support -->
+                         <div v-else v-html="renderMarkdown(item.result)"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -141,6 +225,18 @@
             setup() {
                 const file = ref(null)
                 const imagePreview = ref(null)
+                const mode = ref('image') // 'image' or 'video'
+                
+                // Video state
+                const videoFirstFrame = ref(null)
+                const videoLastFrame = ref(null)
+                const videoFirstFramePreview = ref(null)
+                const videoLastFramePreview = ref(null)
+                const videoPrompt = ref('A cinematic video transition...')
+                const videoBatchCount = ref(1)
+                const videoDuration = ref(5)
+                const nextVideoFrameTarget = ref('first')
+
                 const systemPrompt = ref('Generate a variation of this image. 生成符合prompt的图片，要求清晰，风格一致、白色背景')
                 const userPrompt = ref('请生成一个袋熊。')
                 const batchCount = ref(3)
@@ -162,15 +258,30 @@
                 }
 
                 // 选择历史图片并填入上传区
+                const assignVideoFrame = (fileObj, previewSrc) => {
+                    if (nextVideoFrameTarget.value === 'first' || !videoFirstFrame.value) {
+                        videoFirstFrame.value = fileObj
+                        videoFirstFramePreview.value = previewSrc
+                        nextVideoFrameTarget.value = 'last'
+                    } else {
+                        videoLastFrame.value = fileObj
+                        videoLastFramePreview.value = previewSrc
+                        nextVideoFrameTarget.value = 'first'
+                    }
+                }
+
                 const selectHistoryImage = async (imgObj) => {
                     try {
                         const response = await fetch(imgObj.url)
                         const blob = await response.blob()
-                        // 创建一个新的 File 对象，模拟用户上传
                         const newFile = new File([blob], imgObj.filename, { type: blob.type })
                         
-                        file.value = newFile
-                        imagePreview.value = imgObj.url
+                        if (mode.value === 'video') {
+                            assignVideoFrame(newFile, imgObj.url)
+                        } else {
+                            file.value = newFile
+                            imagePreview.value = imgObj.url
+                        }
                     } catch (e) {
                         console.error("Failed to select image", e)
                         alert("图片加载失败")
@@ -185,6 +296,54 @@
                     if (selectedFile) {
                         file.value = selectedFile
                         imagePreview.value = URL.createObjectURL(selectedFile)
+                    }
+                }
+
+                const handleVideoFileUpload = (event, type) => {
+                    const selectedFile = event.target.files[0]
+                    if (selectedFile) {
+                        if (type === 'first') {
+                            videoFirstFrame.value = selectedFile
+                            videoFirstFramePreview.value = URL.createObjectURL(selectedFile)
+                            nextVideoFrameTarget.value = 'last'
+                        } else {
+                            videoLastFrame.value = selectedFile
+                            videoLastFramePreview.value = URL.createObjectURL(selectedFile)
+                            nextVideoFrameTarget.value = 'first'
+                        }
+                    }
+                }
+
+                const runVideoBatch = async () => {
+                    if (!videoFirstFrame.value || !videoLastFrame.value) return
+                    
+                    loading.value = true
+                    results.value = []
+
+                    const formData = new FormData()
+                    formData.append('first_frame', videoFirstFrame.value)
+                    formData.append('last_frame', videoLastFrame.value)
+                    formData.append('prompt', videoPrompt.value)
+                    formData.append('batch_count', videoBatchCount.value)
+                    formData.append('duration', videoDuration.value)
+
+                    try {
+                        const response = await fetch('/api/video_generate', {
+                            method: 'POST',
+                            body: formData
+                        })
+                        
+                        const data = await response.json()
+                        if (data.results) {
+                            results.value = data.results
+                        } else {
+                            alert('生成失败: ' + JSON.stringify(data))
+                        }
+                    } catch (error) {
+                        console.error(error)
+                        alert('请求出错，请检查后台日志')
+                    } finally {
+                        loading.value = false
                     }
                 }
 
@@ -240,7 +399,17 @@
                     runBatch,
                     renderMarkdown,
                     loadHistory,
-                    selectHistoryImage
+                    selectHistoryImage,
+                    mode,
+                    videoFirstFrame,
+                    videoLastFrame,
+                    videoFirstFramePreview,
+                    videoLastFramePreview,
+                    videoPrompt,
+                    videoBatchCount,
+                    videoDuration,
+                    handleVideoFileUpload,
+                    runVideoBatch
                 }
             }
         }).mount('#app')
