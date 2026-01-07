@@ -1,10 +1,12 @@
 import os
 import time
+import base64
 import concurrent.futures
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, jsonify, send_from_directory
+import json
+from flask import Flask, render_template, request, jsonify, send_from_directory, Response, stream_with_context
 from werkzeug.utils import secure_filename
 
 # 加载环境变量
@@ -36,31 +38,34 @@ def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def generate_gemini_response(index, system_prompt, user_prompt, image_path):
+def generate_gemini_response(index, system_prompt, user_prompt, image_paths):
     """
     调用 Google Gemini API (v2 SDK) 生成回复
     """
     try:
-        # 读取图片数据
-        with open(image_path, 'rb') as f:
-            image_data = f.read()
+        parts = [types.Part.from_text(text=system_prompt)]
+
+        # 处理所有图片
+        for image_path in image_paths:
+            with open(image_path, 'rb') as f:
+                image_data = f.read()
             
-        mime_type = 'image/jpeg'
-        if image_path.lower().endswith('.png'):
-            mime_type = 'image/png'
-        elif image_path.lower().endswith('.webp'):
-            mime_type = 'image/webp'
+            mime_type = 'image/jpeg'
+            if image_path.lower().endswith('.png'):
+                mime_type = 'image/png'
+            elif image_path.lower().endswith('.webp'):
+                mime_type = 'image/webp'
+            
+            parts.append(types.Part.from_bytes(data=image_data, mime_type=mime_type))
+
+        parts.append(types.Part.from_text(text=user_prompt))
 
         # 构建 Prompt
         # SDK v2 使用 contents 列表
         contents = [
             types.Content(
                 role="user",
-                parts=[
-                    types.Part.from_text(text=system_prompt), # System prompt usually part of user message or separate system instruction
-                    types.Part.from_bytes(data=image_data, mime_type=mime_type),
-                    types.Part.from_text(text=user_prompt)
-                ]
+                parts=parts
             )
         ]
         
@@ -108,6 +113,8 @@ def generate_gemini_response(index, system_prompt, user_prompt, image_path):
                 # 2. 内嵌图像 (inline_data)
                 if part.inline_data:
                     try:
+                        print(f"[DEBUG] Received inline data for index {index}. MimeType: {part.inline_data.mime_type}")
+                        
                         timestamp = int(time.time() * 1000)
                         ext = 'png'
                         if part.inline_data.mime_type == 'image/jpeg':
@@ -120,9 +127,35 @@ def generate_gemini_response(index, system_prompt, user_prompt, image_path):
                         
                         # 保存图片
                         # SDK v2 中，inline_data.data 通常是 bytes
+                        data_to_write = part.inline_data.data
+                        print(f"[DEBUG] Data type: {type(data_to_write)}")
+                        
+                        if data_to_write:
+                             print(f"[DEBUG] Data size: {len(data_to_write)} bytes")
+                             if isinstance(data_to_write, bytes):
+                                 print(f"[DEBUG] First 20 bytes (hex): {data_to_write[:20].hex()}")
+                                 
+                                 # Check if data is Base64 encoded bytes (common issue with some APIs)
+                                 # PNG starts with 'iVBOR', JPEG with '/9j/', WebP with 'UklGR'
+                                 # Converting to bytes comparison
+                                 if data_to_write.startswith(b'iVBOR') or \
+                                    data_to_write.startswith(b'/9j/') or \
+                                    data_to_write.startswith(b'UklGR'):
+                                     print("[DEBUG] Detected Base64 encoded bytes, attempting to decode...")
+                                     try:
+                                         decoded_data = base64.b64decode(data_to_write)
+                                         print(f"[DEBUG] Base64 decoded successfully. Size: {len(data_to_write)} -> {len(decoded_data)}")
+                                         data_to_write = decoded_data
+                                     except Exception as b64_err:
+                                         print(f"[DEBUG] Base64 decode failed: {b64_err}")
+                        else:
+                             print(f"[DEBUG] Data is empty!")
+
                         with open(gen_filepath, 'wb') as f:
-                            f.write(part.inline_data.data)
+                            f.write(data_to_write)
+                            f.flush() # Ensure data is written
                             
+                        print(f"[DEBUG] Image saved to: {gen_filepath}")
                         result_content += f"\n![Generated Image](/uploads/{gen_filename})\n"
                     except Exception as img_err:
                          print(f"Error saving image: {img_err}")
@@ -182,17 +215,20 @@ def generate_video_task(index, prompt, first_frame_path, last_frame_path, durati
 
         # Note: duration is not directly supported in generate_videos currently (as per typical API),
         # but we can include it in the prompt.
-        full_prompt = f"{prompt} (Duration: {duration} seconds)"
+        full_prompt = f"{prompt} (Duration: {duration} seconds. Transition to the provided end frame.)"
 
         print(f"Starting video generation {index} with prompt: {full_prompt}")
         
+        # 如果报错 GenerateVideosConfig last_frame Extra inputs are not permitted
+        # 说明当前 SDK 版本的 GenerateVideosConfig 不支持 last_frame 字段。
+        # 我们暂时只传入 image (起始帧)，并将尾帧意图放入 prompt 中。
         operation = client.models.generate_videos(
             model="veo-3.1-generate-preview",
             prompt=full_prompt,
             image=first_image,
-            config=types.GenerateVideosConfig(
-                last_frame=last_image
-            ),
+            # config=types.GenerateVideosConfig(
+            #     last_frame=last_image
+            # ),
         )
         
         # Poll the operation status
@@ -276,18 +312,22 @@ def get_history():
 @app.route('/api/batch_generate', methods=['POST'])
 def batch_generate():
     # 1. 校验图片
-    if 'image' not in request.files:
+    if 'images' not in request.files:
         return jsonify({"error": "没有上传图片"}), 400
     
-    file = request.files['image']
-    if file.filename == '':
+    files = request.files.getlist('images')
+    if not files or files[0].filename == '':
         return jsonify({"error": "未选择文件"}), 400
     
-    if file and allowed_file(file.filename):
-        filename = secure_filename(file.filename)
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(filepath)
-    else:
+    filepaths = []
+    for file in files:
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            filepaths.append(filepath)
+    
+    if not filepaths:
         return jsonify({"error": "文件类型不支持"}), 400
 
     # 2. 获取参数
@@ -303,29 +343,28 @@ def batch_generate():
         batch_count = 1
 
     # 3. 并发执行生成任务
-    results = []
-    # 使用 ThreadPoolExecutor 进行并发处理
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = []
-        for i in range(batch_count):
-            futures.append(
-                executor.submit(generate_gemini_response, i, system_prompt, user_prompt, filepath)
-            )
-        
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as e:
-                results.append({"status": "error", "error": str(e)})
+    # 使用 stream_with_context 实现流式响应
+    def generate_stream():
+        # 降低并发数到 3，避免触发速率限制
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            futures = []
+            for i in range(batch_count):
+                # 稍微延迟提交，避免瞬间并发过高
+                if i > 0:
+                    time.sleep(0.5)
+                futures.append(
+                    executor.submit(generate_gemini_response, i, system_prompt, user_prompt, filepaths)
+                )
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    yield json.dumps(result) + "\n"
+                except Exception as e:
+                    error_res = {"status": "error", "error": str(e)}
+                    yield json.dumps(error_res) + "\n"
 
-    # 结果按索引排序
-    results.sort(key=lambda x: x.get('index', 0))
-
-    return jsonify({
-        "message": "批处理完成",
-        "total": batch_count,
-        "results": results
-    })
+    return Response(stream_with_context(generate_stream()), mimetype='application/x-ndjson')
 
 @app.route('/api/video_generate', methods=['POST'])
 def video_generate():
@@ -367,29 +406,27 @@ def video_generate():
         duration = 5
 
     # 3. 并发执行生成任务
-    results = []
-    # Video generation is slower, limit workers
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        futures = []
-        for i in range(batch_count):
-            futures.append(
-                executor.submit(generate_video_task, i, prompt, first_filepath, last_filepath, duration)
-            )
-        
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as e:
-                results.append({"status": "error", "error": str(e)})
+    # 使用 stream_with_context 流式输出视频结果
+    def generate_video_stream():
+        # Video generation is slower, limit workers
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            for i in range(batch_count):
+                if i > 0:
+                    time.sleep(1.0) # 视频生成更耗时，增加间隔
+                futures.append(
+                    executor.submit(generate_video_task, i, prompt, first_filepath, last_filepath, duration)
+                )
+            
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    yield json.dumps(result) + "\n"
+                except Exception as e:
+                    error_res = {"status": "error", "error": str(e)}
+                    yield json.dumps(error_res) + "\n"
 
-    # 结果按索引排序
-    results.sort(key=lambda x: x.get('index', 0))
-
-    return jsonify({
-        "message": "视频生成批处理完成",
-        "total": batch_count,
-        "results": results
-    })
+    return Response(stream_with_context(generate_video_stream()), mimetype='application/x-ndjson')
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
